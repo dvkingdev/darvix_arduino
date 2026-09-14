@@ -3,35 +3,27 @@
 #include <WiFiClientSecureBearSSL.h>
 #include <ArduinoJson.h>
 
-const char* WIFI_SSID = "DV_KING_CODE";
-const char* WIFI_PASSWORD = "@tib585f3x139";
+#define DEBUG_SERIAL true
+
+const char* WIFI_SSID = "iPhoneDvKingDev";
+const char* WIFI_PASSWORD = "12345678*";
 
 const char* FIREBASE_HOST =
   "https://fonde-pantalla-septiembre-default-rtdb.firebaseio.com";
 
 const char* FIREBASE_AUTH = "";
-
 const char* HOGAR_ID = "hogar_001";
-const char* AMBIENTE_ID = "sala_principal";
-const char* LUZ_ID = "luz_principal";
-
-const uint8_t PIN_WW = D1;
-const uint8_t PIN_CW = D2;
-const uint8_t PIN_LED = D4;
-const uint8_t PIN_TOUCH = D5;
-const uint8_t PIN_LDR = D6;
 
 const int PWM_MAX = 1023;
 
-const bool LDR_ACTIVO_EN_LOW = true;
-
-const unsigned long INTERVALO_FIREBASE = 1000;
+const unsigned long INTERVALO_FIREBASE = 400;
 const unsigned long INTERVALO_LDR = 100;
 const unsigned long ESTABILIDAD_LDR = 400;
 const unsigned long ESPERA_VALIDACION = 1200;
 const unsigned long INTERVALO_RECONEXION = 10000;
-const unsigned long PARPADEO_LED = 500;
 const unsigned long TOUCH_MINIMO = 80;
+
+const bool LDR_ACTIVO_EN_LOW = true;
 
 enum OrigenOrden {
   ORIGEN_SISTEMA,
@@ -39,39 +31,190 @@ enum OrigenOrden {
   ORIGEN_TOUCH
 };
 
-bool salidaEncendida = false;
-bool estadoFirebase = false;
-bool estadoLdr = false;
-bool ldrPendiente = false;
-bool touchAnterior = false;
-bool esperandoValidacion = false;
-bool ordenSolicitada = false;
+struct Ambiente {
+  const char* id;
+  const char* nombre;
+  const char* luzId;
+
+  uint8_t pinWW;
+  uint8_t pinCW;
+  int8_t pinTouch;
+  int8_t pinLdr;
+
+  bool ldrAnalogico;
+  bool touchDisponible;
+
+  bool salidaEncendida;
+  bool estadoFirebase;
+  bool touchAnterior;
+
+  bool estadoLdr;
+  bool ldrPendiente;
+
+  bool esperandoValidacion;
+  bool ordenSolicitada;
+
+  int intensidad;
+  int temperatura;
+
+  unsigned long inicioTouch;
+  unsigned long tiempoCambioLdr;
+  unsigned long tiempoValidacion;
+
+  String ultimoSnapshot;
+};
+
+Ambiente ambientes[] = {
+  {
+    "sala_principal",
+    "SALA PRINCIPAL",
+    "luz_principal",
+
+    D1,
+    D2,
+    D0,
+    D6,
+
+    false,
+    true,
+
+    false,
+    false,
+    false,
+
+    false,
+    false,
+
+    false,
+    false,
+
+    70,
+    4000,
+
+    0,
+    0,
+    0,
+
+    ""
+  },
+
+  {
+    "sala_secundaria",
+    "SALA SECUNDARIA",
+    "luz_principal",
+
+    D3,
+    D4,
+    D7,
+    3,
+
+    false,
+    true,
+
+    false,
+    false,
+    false,
+
+    false,
+    false,
+
+    false,
+    false,
+
+    70,
+    4000,
+
+    0,
+    0,
+    0,
+
+    ""
+  },
+
+  {
+    "cocina",
+    "COCINA",
+    "luz_principal",
+
+    D5,
+    D8,
+    1,
+    A0,
+
+    true,
+    !DEBUG_SERIAL,
+
+    false,
+    false,
+    false,
+
+    false,
+    false,
+
+    false,
+    false,
+
+    70,
+    4000,
+
+    0,
+    0,
+    0,
+
+    ""
+  }
+};
+
+const uint8_t TOTAL_AMBIENTES =
+  sizeof(ambientes) / sizeof(ambientes[0]);
+
 bool firebaseConectado = false;
-bool ledParpadeando = false;
-bool snapshotInicializado = false;
-bool ignorarSiguienteSnapshot = false;
 
-int intensidadActual = 70;
-int temperaturaActual = 4000;
+uint8_t ambienteFirebase = 0;
 
-String ultimoSnapshot;
-
-unsigned long inicioTouch = 0;
 unsigned long tiempoFirebase = 0;
 unsigned long tiempoLdr = 0;
-unsigned long tiempoCambioLdr = 0;
-unsigned long tiempoValidacion = 0;
 unsigned long tiempoReconexion = 0;
-unsigned long finParpadeo = 0;
 
-String rutaLuz() {
-  return String("hogares/") + HOGAR_ID +
-         "/ambientes/" + AMBIENTE_ID +
-         "/luces/" + LUZ_ID;
+void log(const String& texto) {
+  if (DEBUG_SERIAL)
+    Serial.println(texto);
 }
 
-String urlFirebase() {
-  String url = String(FIREBASE_HOST) + "/" + rutaLuz() + ".json";
+void log(const char* texto) {
+  if (DEBUG_SERIAL)
+    Serial.println(texto);
+}
+
+String boolTexto(bool valor) {
+  return valor ? "TRUE" : "FALSE";
+}
+
+String origenTexto(OrigenOrden origen) {
+  if (origen == ORIGEN_APP)
+    return "APP";
+
+  if (origen == ORIGEN_TOUCH)
+    return "TOUCH";
+
+  return "SISTEMA";
+}
+
+String rutaLuz(const Ambiente& a) {
+  return String("hogares/") +
+         HOGAR_ID +
+         "/ambientes/" +
+         a.id +
+         "/luces/" +
+         a.luzId;
+}
+
+String urlFirebase(const String& ruta) {
+  String url =
+    String(FIREBASE_HOST) +
+    "/" +
+    ruta +
+    ".json";
 
   if (strlen(FIREBASE_AUTH)) {
     url += "?auth=";
@@ -81,51 +224,32 @@ String urlFirebase() {
   return url;
 }
 
-void controlarLed(bool encender) {
-  digitalWrite(PIN_LED, encender ? LOW : HIGH);
+void imprimirSeparador() {
+  log("----------------------------------------");
 }
 
-void actualizarLed() {
-  if (ledParpadeando) {
-    if ((long)(millis() - finParpadeo) < 0) return;
+void imprimirAmbiente(const Ambiente& a) {
+  if (!DEBUG_SERIAL)
+    return;
 
-    ledParpadeando = false;
-    Serial.println("LED -> FIJO");
-  }
-
-  controlarLed(
-    WiFi.status() == WL_CONNECTED &&
-    firebaseConectado
-  );
-}
-
-void actividadLed() {
-  if (WiFi.status() != WL_CONNECTED || !firebaseConectado) return;
-
-  Serial.println("LED -> PARPADEO");
-
-  ledParpadeando = true;
-  controlarLed(false);
-
-  finParpadeo = millis() + PARPADEO_LED;
+  Serial.print("[");
+  Serial.print(a.nombre);
+  Serial.print("] ");
 }
 
 void conectarWiFi() {
-  if (WiFi.status() == WL_CONNECTED) return;
+  if (WiFi.status() == WL_CONNECTED)
+    return;
 
   firebaseConectado = false;
-  controlarLed(false);
+
+  log("");
+  log("========================================");
+  log("DARVIX -> CONECTANDO WIFI");
+  log("========================================");
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  Serial.println();
-  Serial.println("============================");
-  Serial.println("DARVIX WIFI");
-  Serial.println("============================");
-
-  Serial.print("Conectando a ");
-  Serial.println(WIFI_SSID);
 
   unsigned long inicio = millis();
 
@@ -133,43 +257,52 @@ void conectarWiFi() {
     WiFi.status() != WL_CONNECTED &&
     millis() - inicio < 20000
   ) {
-    Serial.print(".");
-    delay(500);
+    if (DEBUG_SERIAL)
+      Serial.print(".");
+
+    delay(250);
     yield();
   }
 
-  Serial.println();
+  if (DEBUG_SERIAL)
+    Serial.println();
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi -> NO CONECTADO");
-    return;
+  if (WiFi.status() == WL_CONNECTED) {
+    log("WIFI -> CONECTADO");
+
+    if (DEBUG_SERIAL) {
+      Serial.print("SSID -> ");
+      Serial.println(WiFi.SSID());
+
+      Serial.print("IP -> ");
+      Serial.println(WiFi.localIP());
+
+      Serial.print("RSSI -> ");
+      Serial.print(WiFi.RSSI());
+      Serial.println(" dBm");
+    }
+  } else {
+    log("WIFI -> ERROR DE CONEXION");
   }
 
-  Serial.println("WiFi -> CONECTADO");
-
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
-
-  Serial.print("RSSI: ");
-  Serial.print(WiFi.RSSI());
-  Serial.println(" dBm");
+  imprimirSeparador();
 }
 
 void reconectarWiFi() {
-  if (WiFi.status() == WL_CONNECTED) return;
+  if (WiFi.status() == WL_CONNECTED)
+    return;
 
   firebaseConectado = false;
-  controlarLed(false);
 
-  Serial.println("WiFi -> RECONECTANDO");
+  log("");
+  log("[WIFI] DESCONectado -> RECONECTANDO");
 
   WiFi.disconnect();
   delay(100);
-
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
 
-String firebaseGet() {
+String firebaseGet(const String& ruta) {
   if (WiFi.status() != WL_CONNECTED) {
     firebaseConectado = false;
     return "";
@@ -183,8 +316,9 @@ String firebaseGet() {
 
   HTTPClient https;
 
-  if (!https.begin(*client, urlFirebase())) {
+  if (!https.begin(*client, urlFirebase(ruta))) {
     firebaseConectado = false;
+    log("[FIREBASE] ERROR AL INICIAR HTTPS");
     return "";
   }
 
@@ -199,19 +333,26 @@ String firebaseGet() {
   } else {
     firebaseConectado = false;
 
-    Serial.print("Firebase GET error: ");
-    Serial.println(codigo);
+    if (DEBUG_SERIAL) {
+      Serial.print("[FIREBASE] GET ERROR -> ");
+      Serial.println(codigo);
+    }
   }
 
   https.end();
-  actualizarLed();
 
   return respuesta;
 }
 
-bool firebasePatch(const String& payload) {
+bool firebasePatch(
+  const String& ruta,
+  const String& payload
+) {
   if (WiFi.status() != WL_CONNECTED) {
     firebaseConectado = false;
+
+    log("[FIREBASE] PATCH CANCELADO -> SIN WIFI");
+
     return false;
   }
 
@@ -223,15 +364,25 @@ bool firebasePatch(const String& payload) {
 
   HTTPClient https;
 
-  if (!https.begin(*client, urlFirebase())) {
+  if (!https.begin(*client, urlFirebase(ruta))) {
     firebaseConectado = false;
+    log("[FIREBASE] ERROR AL INICIAR PATCH");
+
     return false;
   }
 
   https.setTimeout(5000);
-  https.addHeader("Content-Type", "application/json");
 
-  int codigo = https.sendRequest("PATCH", payload);
+  https.addHeader(
+    "Content-Type",
+    "application/json"
+  );
+
+  int codigo =
+    https.sendRequest(
+      "PATCH",
+      payload
+    );
 
   bool ok =
     codigo >= 200 &&
@@ -239,259 +390,399 @@ bool firebasePatch(const String& payload) {
 
   firebaseConectado = ok;
 
-  if (!ok) {
-    Serial.print("Firebase PATCH error: ");
+  if (DEBUG_SERIAL) {
+    Serial.print("[FIREBASE] PATCH -> ");
+    Serial.print(ok ? "OK" : "ERROR");
+    Serial.print(" | HTTP ");
     Serial.println(codigo);
   }
 
   https.end();
-  actualizarLed();
-
-  if (ok) actividadLed();
 
   return ok;
 }
 
-bool leerLdr() {
-  int lectura = digitalRead(PIN_LDR);
+bool leerLdr(const Ambiente& a) {
+  if (a.ldrAnalogico) {
+    int lectura = analogRead(A0);
+
+    bool alto =
+      lectura > 500;
+
+    return LDR_ACTIVO_EN_LOW
+      ? !alto
+      : alto;
+  }
+
+  bool alto =
+    digitalRead(
+      a.pinLdr
+    ) == HIGH;
 
   return LDR_ACTIVO_EN_LOW
-    ? lectura == LOW
-    : lectura == HIGH;
+    ? !alto
+    : alto;
 }
 
-void aplicarIluminacion(bool encender) {
-  salidaEncendida = encender;
+bool leerTouch(const Ambiente& a) {
+  if (!a.touchDisponible)
+    return false;
+
+  return digitalRead(
+    a.pinTouch
+  ) == HIGH;
+}
+
+void aplicarIluminacion(
+  Ambiente& a,
+  bool encender
+) {
+  a.salidaEncendida =
+    encender;
 
   if (!encender) {
-    analogWrite(PIN_WW, 0);
-    analogWrite(PIN_CW, 0);
+    analogWrite(
+      a.pinWW,
+      0
+    );
 
-    Serial.println("LUZ -> APAGADA");
+    analogWrite(
+      a.pinCW,
+      0
+    );
+
+    imprimirAmbiente(a);
+    log("SALIDA -> APAGADA");
+
     return;
   }
 
   float intensidad =
-    intensidadActual / 100.0f;
+    constrain(
+      a.intensidad,
+      0,
+      100
+    ) /
+    100.0f;
 
-  float frio = constrain(
-    (temperaturaActual - 2700.0f) / 3800.0f,
-    0.0f,
-    1.0f
-  );
+  float frio =
+    constrain(
+      (
+        a.temperatura -
+        2700.0f
+      ) /
+      3800.0f,
+      0.0f,
+      1.0f
+    );
 
-  analogWrite(
-    PIN_WW,
+  float calido =
+    1.0f -
+    frio;
+
+  int pwmWW =
     round(
       PWM_MAX *
       intensidad *
-      (1.0f - frio)
-    )
-  );
+      calido
+    );
 
-  analogWrite(
-    PIN_CW,
+  int pwmCW =
     round(
       PWM_MAX *
       intensidad *
       frio
-    )
+    );
+
+  analogWrite(
+    a.pinWW,
+    pwmWW
   );
 
-  Serial.println("LUZ -> ENCENDIDA");
+  analogWrite(
+    a.pinCW,
+    pwmCW
+  );
 
-  Serial.print("Intensidad: ");
-  Serial.print(intensidadActual);
-  Serial.println("%");
+  if (DEBUG_SERIAL) {
+    imprimirAmbiente(a);
+    Serial.println("SALIDA -> ENCENDIDA");
 
-  Serial.print("Temperatura: ");
-  Serial.print(temperaturaActual);
-  Serial.println(" K");
+    imprimirAmbiente(a);
+    Serial.print("INTENSIDAD -> ");
+    Serial.print(a.intensidad);
+    Serial.println("%");
+
+    imprimirAmbiente(a);
+    Serial.print("TEMPERATURA -> ");
+    Serial.print(a.temperatura);
+    Serial.println(" K");
+
+    imprimirAmbiente(a);
+    Serial.print("PWM WW -> ");
+    Serial.println(pwmWW);
+
+    imprimirAmbiente(a);
+    Serial.print("PWM CW -> ");
+    Serial.println(pwmCW);
+  }
 }
 
 void ejecutarOrden(
+  Ambiente& a,
   bool encender,
   OrigenOrden origen
 ) {
-  ordenSolicitada = encender;
+  a.ordenSolicitada =
+    encender;
 
-  Serial.println();
+  log("");
+  imprimirSeparador();
 
-  if (origen == ORIGEN_APP) {
-    Serial.print("APP");
-  } else if (origen == ORIGEN_TOUCH) {
-    Serial.print("TOUCH");
-  } else {
-    Serial.print("SISTEMA");
+  imprimirAmbiente(a);
+
+  if (DEBUG_SERIAL) {
+    Serial.print("ORDEN ");
+    Serial.print(origenTexto(origen));
+    Serial.print(" -> ");
+    Serial.println(
+      encender
+        ? "ENCENDER"
+        : "APAGAR"
+    );
   }
 
-  Serial.print(" -> ");
-  Serial.println(
+  aplicarIluminacion(
+    a,
     encender
-      ? "ENCENDER"
-      : "APAGAR"
   );
 
-  aplicarIluminacion(encender);
+  a.esperandoValidacion =
+    true;
 
-  esperandoValidacion = true;
-  tiempoValidacion = millis();
+  a.tiempoValidacion =
+    millis();
 
-  Serial.println("LDR -> ESPERANDO VALIDACION");
+  imprimirAmbiente(a);
+  log("LDR -> ESPERANDO VALIDACION...");
 }
 
-void enviarEstadoLdr(bool hayLuz) {
+void enviarEstadoLdr(Ambiente& a, bool hayLuz) {
+
+  if (!hayLuz && a.salidaEncendida) {
+    imprimirAmbiente(a);
+    log("LDR -> NO HAY LUZ | CORTANDO SALIDAS");
+
+    aplicarIluminacion(a, false);
+
+    a.ordenSolicitada = false;
+
+    imprimirAmbiente(a);
+    log("SEGURIDAD -> PWM WW = 0 | PWM CW = 0");
+  }
+
   String payload =
     String("{\"encendida\":") +
     (hayLuz ? "true" : "false") +
     "}";
 
-  Serial.println();
-  Serial.print("LDR -> FIREBASE encendida = ");
-  Serial.println(
-    hayLuz
-      ? "TRUE"
-      : "FALSE"
-  );
+  imprimirAmbiente(a);
 
-  if (!firebasePatch(payload)) {
-    Serial.println("LDR -> ERROR FIREBASE");
-    return;
+  if (DEBUG_SERIAL) {
+    Serial.print("FIREBASE <- encendida = ");
+    Serial.println(boolTexto(hayLuz));
   }
 
-  estadoFirebase = hayLuz;
-  ignorarSiguienteSnapshot = true;
+  if (firebasePatch(rutaLuz(a), payload)) {
+    a.estadoFirebase = hayLuz;
 
-  Serial.println("LDR -> FIREBASE OK");
+    imprimirAmbiente(a);
+    log("SINCRONIZACION FIREBASE -> OK");
+  } else {
+    imprimirAmbiente(a);
+    log("SINCRONIZACION FIREBASE -> ERROR");
+  }
 }
 
-void validarConLdr() {
-  if (!esperandoValidacion) return;
+void validarConLdr(
+  Ambiente& a
+) {
+  if (!a.esperandoValidacion)
+    return;
 
   if (
-    millis() - tiempoValidacion <
+    millis() -
+    a.tiempoValidacion <
     ESPERA_VALIDACION
-  ) {
+  )
     return;
+
+  a.esperandoValidacion =
+    false;
+
+  bool hayLuz =
+    leerLdr(a);
+
+  a.estadoLdr =
+    hayLuz;
+
+  a.ldrPendiente =
+    hayLuz;
+
+  imprimirAmbiente(a);
+
+  if (DEBUG_SERIAL) {
+    Serial.print("LDR -> ");
+    Serial.println(
+      hayLuz
+        ? "HAY LUZ"
+        : "NO HAY LUZ"
+    );
+
+    imprimirAmbiente(a);
+
+    Serial.print("ORDEN SOLICITADA -> ");
+    Serial.println(
+      a.ordenSolicitada
+        ? "ENCENDER"
+        : "APAGAR"
+    );
+
+    imprimirAmbiente(a);
+
+    Serial.print("VALIDACION -> ");
+
+    Serial.println(
+      hayLuz ==
+      a.ordenSolicitada
+        ? "CORRECTA"
+        : "FALLO FISICO"
+    );
   }
-
-  esperandoValidacion = false;
-
-  bool hayLuz = leerLdr();
-
-  estadoLdr = hayLuz;
-  ldrPendiente = hayLuz;
-
-  Serial.println();
-  Serial.println("============================");
-  Serial.println("VALIDACION LDR");
-  Serial.println("============================");
-
-  Serial.print("Orden solicitada: ");
-  Serial.println(
-    ordenSolicitada
-      ? "ENCENDER"
-      : "APAGAR"
-  );
-
-  Serial.print("LDR detecta: ");
-  Serial.println(
-    hayLuz
-      ? "HAY LUZ"
-      : "NO HAY LUZ"
-  );
-
-  Serial.println(
-    ordenSolicitada == hayLuz
-      ? "RESULTADO -> CORRECTO"
-      : "RESULTADO -> FALLO"
-  );
-
-  enviarEstadoLdr(hayLuz);
-}
-
-void controlarLdr() {
-  if (
-    millis() - tiempoLdr <
-    INTERVALO_LDR
-  ) {
-    return;
-  }
-
-  tiempoLdr = millis();
-
-  bool lectura = leerLdr();
-
-  if (lectura != ldrPendiente) {
-    ldrPendiente = lectura;
-    tiempoCambioLdr = millis();
-
-    return;
-  }
-
-  if (lectura == estadoLdr) return;
-
-  if (
-    millis() - tiempoCambioLdr <
-    ESTABILIDAD_LDR
-  ) {
-    return;
-  }
-
-  estadoLdr = lectura;
-
-  Serial.println();
-
-  Serial.print("LDR ESTABLE -> ");
-  Serial.println(
-    estadoLdr
-      ? "HAY LUZ"
-      : "NO HAY LUZ"
-  );
-
-  if (esperandoValidacion) return;
 
   enviarEstadoLdr(
-    estadoLdr
+    a,
+    hayLuz
+  );
+
+  imprimirSeparador();
+}
+
+void controlarLdr(
+  Ambiente& a
+) {
+  bool lectura =
+    leerLdr(a);
+
+  if (
+    lectura !=
+    a.ldrPendiente
+  ) {
+    a.ldrPendiente =
+      lectura;
+
+    a.tiempoCambioLdr =
+      millis();
+
+    return;
+  }
+
+  if (
+    lectura ==
+    a.estadoLdr
+  )
+    return;
+
+  if (
+    millis() -
+    a.tiempoCambioLdr <
+    ESTABILIDAD_LDR
+  )
+    return;
+
+  a.estadoLdr =
+    lectura;
+
+  imprimirAmbiente(a);
+
+  if (DEBUG_SERIAL) {
+    Serial.print("LDR CAMBIO ESTABLE -> ");
+
+    Serial.println(
+      lectura
+        ? "HAY LUZ"
+        : "NO HAY LUZ"
+    );
+  }
+
+  if (a.esperandoValidacion)
+    return;
+
+  enviarEstadoLdr(
+    a,
+    lectura
   );
 }
 
-void controlarTouch() {
-  bool touch =
-    digitalRead(PIN_TOUCH) ==
-    HIGH;
+void controlarTouch(
+  Ambiente& a
+) {
+  if (!a.touchDisponible)
+    return;
 
-  if (touch && !touchAnterior) {
-    inicioTouch = millis();
+  bool touch =
+    leerTouch(a);
+
+  if (
+    touch &&
+    !a.touchAnterior
+  ) {
+    a.inicioTouch =
+      millis();
+
+    imprimirAmbiente(a);
+    log("TOUCH -> PRESIONADO");
   }
 
-  if (!touch && touchAnterior) {
+  if (
+    !touch &&
+    a.touchAnterior
+  ) {
     unsigned long duracion =
-      millis() - inicioTouch;
+      millis() -
+      a.inicioTouch;
 
-    if (duracion >= TOUCH_MINIMO) {
-      Serial.println();
-      Serial.println("HTTM -> TOQUE");
+    imprimirAmbiente(a);
 
-      actividadLed();
+    if (DEBUG_SERIAL) {
+      Serial.print("TOUCH -> LIBERADO | ");
+      Serial.print(duracion);
+      Serial.println(" ms");
+    }
 
+    if (
+      duracion >=
+      TOUCH_MINIMO
+    ) {
       ejecutarOrden(
-        !salidaEncendida,
+        a,
+        !a.salidaEncendida,
         ORIGEN_TOUCH
       );
     }
   }
 
-  touchAnterior = touch;
+  a.touchAnterior =
+    touch;
 }
 
-bool leerNodo(
+bool leerNodoFirebase(
   const String& json,
   bool& encendida,
   int& intensidad,
   int& temperatura
 ) {
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(1536);
 
   DeserializationError error =
     deserializeJson(
@@ -500,20 +791,24 @@ bool leerNodo(
     );
 
   if (error) {
-    Serial.print("Firebase JSON error: ");
-    Serial.println(error.c_str());
+    if (DEBUG_SERIAL) {
+      Serial.print("[JSON] ERROR -> ");
+      Serial.println(
+        error.c_str()
+      );
+    }
 
     return false;
   }
 
   encendida =
     doc["encendida"] |
-    estadoFirebase;
+    false;
 
   intensidad =
     constrain(
       doc["intensidad"] |
-      intensidadActual,
+      70,
       0,
       100
     );
@@ -521,7 +816,7 @@ bool leerNodo(
   temperatura =
     constrain(
       doc["temperaturaColor"] |
-      temperaturaActual,
+      4000,
       2700,
       6500
     );
@@ -529,55 +824,78 @@ bool leerNodo(
   return true;
 }
 
-void procesarCambioFirebase(
+void procesarFirebase(
+  Ambiente& a,
   const String& respuesta
 ) {
   bool encendida;
+
   int intensidad;
   int temperatura;
 
-  if (!leerNodo(
-        respuesta,
-        encendida,
-        intensidad,
-        temperatura
-      )) {
+  if (
+    !leerNodoFirebase(
+      respuesta,
+      encendida,
+      intensidad,
+      temperatura
+    )
+  )
     return;
-  }
 
   bool cambioEstado =
-    encendida != estadoFirebase;
+    encendida !=
+    a.estadoFirebase;
 
   bool cambioIntensidad =
-    intensidad != intensidadActual;
+    intensidad !=
+    a.intensidad;
 
   bool cambioTemperatura =
-    temperatura != temperaturaActual;
+    temperatura !=
+    a.temperatura;
 
-  intensidadActual = intensidad;
-  temperaturaActual = temperatura;
+  if (
+    !cambioEstado &&
+    !cambioIntensidad &&
+    !cambioTemperatura
+  )
+    return;
 
-  if (cambioIntensidad) {
-    Serial.print("APP intensidad -> ");
-    Serial.println(intensidadActual);
-  }
+  log("");
+  imprimirAmbiente(a);
+  log("FIREBASE -> CAMBIO DETECTADO");
 
-  if (cambioTemperatura) {
-    Serial.print("APP temperatura -> ");
-    Serial.println(temperaturaActual);
-  }
-
-  if (cambioEstado) {
-    estadoFirebase = encendida;
-
-    Serial.print("APP encendida -> ");
+  if (DEBUG_SERIAL) {
+    imprimirAmbiente(a);
+    Serial.print("encendida -> ");
     Serial.println(
-      encendida
-        ? "TRUE"
-        : "FALSE"
+      boolTexto(encendida)
     );
 
+    imprimirAmbiente(a);
+    Serial.print("intensidad -> ");
+    Serial.print(intensidad);
+    Serial.println("%");
+
+    imprimirAmbiente(a);
+    Serial.print("temperaturaColor -> ");
+    Serial.print(temperatura);
+    Serial.println(" K");
+  }
+
+  a.intensidad =
+    intensidad;
+
+  a.temperatura =
+    temperatura;
+
+  if (cambioEstado) {
+    a.estadoFirebase =
+      encendida;
+
     ejecutarOrden(
+      a,
       encendida,
       ORIGEN_APP
     );
@@ -586,111 +904,72 @@ void procesarCambioFirebase(
   }
 
   if (
-    salidaEncendida &&
-    (cambioIntensidad ||
-     cambioTemperatura)
+    a.salidaEncendida &&
+    (
+      cambioIntensidad ||
+      cambioTemperatura
+    )
   ) {
-    aplicarIluminacion(true);
+    aplicarIluminacion(
+      a,
+      true
+    );
 
-    ordenSolicitada = true;
-    esperandoValidacion = true;
-    tiempoValidacion = millis();
+    a.ordenSolicitada =
+      true;
+
+    a.esperandoValidacion =
+      true;
+
+    a.tiempoValidacion =
+      millis();
+
+    imprimirAmbiente(a);
+    log("PWM ACTUALIZADO -> ESPERANDO LDR");
   }
 }
 
-void leerFirebase() {
+void leerFirebaseAmbiente(
+  Ambiente& a
+) {
   String respuesta =
-    firebaseGet();
+    firebaseGet(
+      rutaLuz(a)
+    );
 
   respuesta.trim();
 
   if (
     respuesta.isEmpty() ||
     respuesta == "null"
-  ) {
+  )
     return;
-  }
-
-  if (!snapshotInicializado) {
-    ultimoSnapshot = respuesta;
-    snapshotInicializado = true;
-
-    return;
-  }
 
   if (
     respuesta ==
-    ultimoSnapshot
-  ) {
+    a.ultimoSnapshot
+  )
     return;
-  }
 
-  ultimoSnapshot = respuesta;
+  a.ultimoSnapshot =
+    respuesta;
 
-  Serial.println();
-  Serial.println(
-    "FIREBASE -> CAMBIO DETECTADO"
-  );
-
-  bool encendida;
-  int intensidad;
-  int temperatura;
-
-  if (!leerNodo(
-        respuesta,
-        encendida,
-        intensidad,
-        temperatura
-      )) {
-    return;
-  }
-
-  if (ignorarSiguienteSnapshot) {
-    ignorarSiguienteSnapshot = false;
-
-    estadoFirebase = encendida;
-    intensidadActual = intensidad;
-    temperaturaActual = temperatura;
-
-    Serial.println(
-      "Origen -> ESP8266 / LDR"
-    );
-
-    return;
-  }
-
-  Serial.println(
-    "Origen -> APP / EXTERNO"
-  );
-
-  actividadLed();
-
-  procesarCambioFirebase(
+  procesarFirebase(
+    a,
     respuesta
   );
 }
 
-void iniciarLdr() {
-  estadoLdr = leerLdr();
-  ldrPendiente = estadoLdr;
-  tiempoCambioLdr = millis();
-
-  Serial.print("LDR inicial -> ");
-
-  Serial.println(
-    estadoLdr
-      ? "HAY LUZ"
-      : "NO HAY LUZ"
-  );
-}
-
-void cargarFirebase() {
-  Serial.println(
-    "Firebase -> CONECTANDO"
-  );
+void cargarEstadoInicial(
+  Ambiente& a
+) {
+  imprimirAmbiente(a);
+  log("CARGANDO FIREBASE...");
 
   String respuesta =
-    firebaseGet();
+    firebaseGet(
+      rutaLuz(a)
+    );
 
   respuesta.trim();
 
@@ -698,9 +977,8 @@ void cargarFirebase() {
     respuesta.isEmpty() ||
     respuesta == "null"
   ) {
-    Serial.println(
-      "Firebase -> SIN DATOS"
-    );
+    imprimirAmbiente(a);
+    log("FIREBASE -> SIN DATOS");
 
     return;
   }
@@ -709,108 +987,237 @@ void cargarFirebase() {
   int intensidad;
   int temperatura;
 
-  if (!leerNodo(
-        respuesta,
-        encendida,
-        intensidad,
-        temperatura
-      )) {
+  if (
+    !leerNodoFirebase(
+      respuesta,
+      encendida,
+      intensidad,
+      temperatura
+    )
+  )
     return;
+
+  a.estadoFirebase =
+    encendida;
+
+  a.intensidad =
+    intensidad;
+
+  a.temperatura =
+    temperatura;
+
+  a.ultimoSnapshot =
+    respuesta;
+
+  if (DEBUG_SERIAL) {
+    imprimirAmbiente(a);
+    Serial.print("ESTADO INICIAL -> ");
+    Serial.println(
+      encendida ? "ON" : "OFF"
+    );
+
+    imprimirAmbiente(a);
+    Serial.print("INTENSIDAD -> ");
+    Serial.print(intensidad);
+    Serial.println("%");
+
+    imprimirAmbiente(a);
+    Serial.print("TEMPERATURA -> ");
+    Serial.print(temperatura);
+    Serial.println(" K");
   }
 
-  estadoFirebase = encendida;
-  intensidadActual = intensidad;
-  temperaturaActual = temperatura;
-
-  ultimoSnapshot = respuesta;
-  snapshotInicializado = true;
-
-  Serial.println(
-    "Firebase -> CONECTADO"
-  );
-
-  Serial.print("encendida = ");
-  Serial.println(
-    estadoFirebase
-      ? "TRUE"
-      : "FALSE"
-  );
-
-  Serial.print("intensidad = ");
-  Serial.println(
-    intensidadActual
-  );
-
-  Serial.print("temperatura = ");
-  Serial.println(
-    temperaturaActual
-  );
-
   aplicarIluminacion(
-    estadoFirebase
+    a,
+    encendida
   );
 
-  ordenSolicitada =
-    estadoFirebase;
+  a.ordenSolicitada =
+    encendida;
 
-  esperandoValidacion =
+  a.esperandoValidacion =
     true;
 
-  tiempoValidacion =
+  a.tiempoValidacion =
     millis();
 }
 
+void iniciarAmbiente(
+  Ambiente& a
+) {
+  pinMode(
+    a.pinWW,
+    OUTPUT
+  );
+
+  pinMode(
+    a.pinCW,
+    OUTPUT
+  );
+
+  if (a.touchDisponible) {
+    pinMode(
+      a.pinTouch,
+      INPUT
+    );
+  }
+
+  if (!a.ldrAnalogico) {
+    pinMode(
+      a.pinLdr,
+      INPUT
+    );
+  }
+
+  analogWrite(
+    a.pinWW,
+    0
+  );
+
+  analogWrite(
+    a.pinCW,
+    0
+  );
+
+  a.touchAnterior =
+    a.touchDisponible
+      ? leerTouch(a)
+      : false;
+
+  a.estadoLdr =
+    leerLdr(a);
+
+  a.ldrPendiente =
+    a.estadoLdr;
+
+  a.tiempoCambioLdr =
+    millis();
+
+  imprimirAmbiente(a);
+  log("HARDWARE -> INICIADO");
+}
+
 void setup() {
-  Serial.begin(115200);
-  delay(500);
+  if (DEBUG_SERIAL) {
+    Serial.begin(115200);
+    delay(300);
 
-  Serial.println();
-  Serial.println("============================");
-  Serial.println("DARVIX ESP8266");
-  Serial.println("============================");
+    Serial.println();
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("        DARVIX ESP8266");
+    Serial.println("     3 AMBIENTES / DEBUG");
+    Serial.println("========================================");
 
-  pinMode(PIN_WW, OUTPUT);
-  pinMode(PIN_CW, OUTPUT);
-  pinMode(PIN_LED, OUTPUT);
-  pinMode(PIN_TOUCH, INPUT);
-  pinMode(PIN_LDR, INPUT);
+    Serial.println();
+    Serial.println("DEBUG SERIAL -> ACTIVADO");
 
-  controlarLed(false);
+    Serial.println(
+      "NOTA: TOUCH COCINA DESACTIVADO EN DEBUG"
+    );
 
-  analogWriteRange(PWM_MAX);
-  analogWriteFreq(1000);
+    Serial.println(
+      "GPIO1/TX ESTA RESERVADO PARA SERIAL"
+    );
 
-  analogWrite(PIN_WW, 0);
-  analogWrite(PIN_CW, 0);
+    Serial.println();
+  }
+
+  analogWriteRange(
+    PWM_MAX
+  );
+
+  analogWriteFreq(
+    1000
+  );
+
+  log("PWM -> 0-1023 / 1000 Hz");
+  log("");
+
+  for (
+    uint8_t i = 0;
+    i < TOTAL_AMBIENTES;
+    i++
+  ) {
+    iniciarAmbiente(
+      ambientes[i]
+    );
+  }
 
   conectarWiFi();
-  iniciarLdr();
-  cargarFirebase();
-  actualizarLed();
 
-  Serial.println();
-  Serial.println("============================");
-  Serial.println("DARVIX LISTO");
-  Serial.println("============================");
+  if (
+    WiFi.status() ==
+    WL_CONNECTED
+  ) {
+    log("");
+    log("FIREBASE -> CARGANDO AMBIENTES");
+    imprimirSeparador();
 
-  Serial.println("D1 -> WW");
-  Serial.println("D2 -> CW");
-  Serial.println("D4 -> LED INTERNO");
-  Serial.println("D5 -> HTTM");
-  Serial.println("D6 -> LDR");
+    for (
+      uint8_t i = 0;
+      i < TOTAL_AMBIENTES;
+      i++
+    ) {
+      cargarEstadoInicial(
+        ambientes[i]
+      );
+
+      delay(100);
+    }
+  }
+
+  log("");
+  log("========================================");
+  log("DARVIX LISTO");
+  log("========================================");
+  log("");
 }
 
 void loop() {
-  controlarTouch();
-  controlarLdr();
-  validarConLdr();
+  for (
+    uint8_t i = 0;
+    i < TOTAL_AMBIENTES;
+    i++
+  ) {
+    controlarTouch(
+      ambientes[i]
+    );
+  }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    firebaseConectado = false;
-    actualizarLed();
+  if (
+    millis() -
+    tiempoLdr >=
+    INTERVALO_LDR
+  ) {
+    tiempoLdr =
+      millis();
+
+    for (
+      uint8_t i = 0;
+      i < TOTAL_AMBIENTES;
+      i++
+    ) {
+      controlarLdr(
+        ambientes[i]
+      );
+
+      validarConLdr(
+        ambientes[i]
+      );
+    }
+  }
+
+  if (
+    WiFi.status() !=
+    WL_CONNECTED
+  ) {
+    firebaseConectado =
+      false;
 
     if (
-      millis() - tiempoReconexion >=
+      millis() -
+      tiempoReconexion >=
       INTERVALO_RECONEXION
     ) {
       tiempoReconexion =
@@ -818,19 +1225,30 @@ void loop() {
 
       reconectarWiFi();
     }
-  }
 
-  if (
-    WiFi.status() == WL_CONNECTED &&
-    millis() - tiempoFirebase >=
+  } else if (
+    millis() -
+    tiempoFirebase >=
     INTERVALO_FIREBASE
   ) {
-    tiempoFirebase = millis();
+    tiempoFirebase =
+      millis();
 
-    leerFirebase();
+    leerFirebaseAmbiente(
+      ambientes[
+        ambienteFirebase
+      ]
+    );
+
+    ambienteFirebase++;
+
+    if (
+      ambienteFirebase >=
+      TOTAL_AMBIENTES
+    ) {
+      ambienteFirebase = 0;
+    }
   }
-
-  actualizarLed();
 
   delay(5);
 }
