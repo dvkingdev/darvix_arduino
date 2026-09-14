@@ -2,7 +2,7 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecureBearSSL.h>
 
-const char* WIFI_SSID = "iPhoneDvKingDev";
+const char* WIFI_SSID = "DV_KING_CODE_5G";
 const char* WIFI_PASSWORD = "12345678*";
 
 const char* FIREBASE_HOST =
